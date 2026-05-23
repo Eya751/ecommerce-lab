@@ -85,19 +85,3 @@ resource "aws_instance" "web" {
 
   tags = { Name = "ecommerce-web-${count.index + 1}" }
 }
-
-# Outputs
-output "instance_public_ips" {
-  description = "Public IPs of the EC2 instances"
-  value       = aws_instance.web[*].public_ip
-}
-
-output "instance_ids" {
-  description = "IDs of the EC2 instances"
-  value       = aws_instance.web[*].id
-}
-
-output "vpc_id" {
-  description = "VPC ID being used"
-  value       = data.aws_vpc.main.id
-}
