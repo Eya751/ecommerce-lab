@@ -1,0 +1,110 @@
+name: Full DevOps Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  terraform:
+    name: Provision Infrastructure
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    outputs:
+      instance_ips: ${{ steps.export.outputs.instance_ips }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+      - name: Export Instance IPs
+        id: export
+        run: |
+          sudo apt-get install -y jq
+          IPS=$(terraform output -json instance_public_ips | jq -r '.[]' | tr '\n' ',')
+          echo "instance_ips=$IPS" >> $GITHUB_OUTPUT
+          echo "EC2 Public IPs: $IPS"
+
+  ansible:
+    name: Configure Servers
+    runs-on: ubuntu-latest
+    needs: terraform
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Ansible
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible jq
+
+      - name: Setup SSH Key
+        run: |
+          echo "${{ secrets.EC2_KEY }}" > key.pem
+          chmod 600 key.pem
+          ls -la key.pem
+
+      - name: Generate Inventory
+        run: |
+          echo "[web]" > inventory.ini
+          for ip in $(echo "${{ needs.terraform.outputs.instance_ips }}" | tr ',' ' '); do
+            if [ -n "$ip" ]; then
+              echo "$ip ansible_user=ubuntu ansible_ssh_private_key_file=key.pem ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> inventory.ini
+            fi
+          done
+          cat inventory.ini
+
+      - name: Wait for SSH
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        run: |
+          sleep 90
+          for i in {1..15}; do
+            ansible all -i inventory.ini -m ping && exit 0
+            echo "SSH not ready yet... retry $i"
+            sleep 20
+          done
+          exit 1
+
+      - name: Run Ansible Deployment
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        run: |
+          ansible-playbook -i inventory.ini ansible/deploy.yml
+
+      - name: Show Application URLs
+        run: |
+          echo "================================"
+          echo "Application is ready!"
+          echo "================================"
+          for ip in $(echo "${{ needs.terraform.outputs.instance_ips }}" | tr ',' ' '); do
+            if [ -n "$ip" ]; then
+              echo "http://$ip"
+            fi
+          done
